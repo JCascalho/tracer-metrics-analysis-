@@ -1,5 +1,11 @@
 # Tracer Metrics Analysis
 
+## Version 2.0.0 Method Update
+
+Starting with v2.0.0, tracer diffusion is calculated using a Miller and Komar-style method-of-moments approach. Diffusion is estimated from the time-rate of change of TMcal-weighted tracer-cloud variance:
+
+```text
+D = delta_variance / (2 * delta_t)
 Python routine for calculating sediment-tracer recovery, centre-of-mass displacement, diffusion, transport velocity, and transport-flux metrics from a multi-campaign tracer-monitoring workbook.
 
 The routine reads an Excel workbook with an injection/reference sheet and campaign sheets, projects Cartesian `x`/`y` offsets into along- and cross-sand-body components, and exports processed campaign tables and summary metrics.
