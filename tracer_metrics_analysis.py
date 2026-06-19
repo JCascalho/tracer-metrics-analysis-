@@ -3,7 +3,7 @@ Tracer Metrics Analysis
 =======================
 
 Python routine for calculating sediment-tracer recovery, centre-of-mass
-displacement, diffusion, transport velocity, and transport-flux metrics from a
+displacement, spreading-based diffusion, transport velocity, and transport-flux metrics from a
 multi-campaign tracer-monitoring workbook.
 
 The workflow reads an Excel workbook with one injection/reference sheet and one
@@ -68,12 +68,12 @@ def safe_tag(text: str) -> str:
 
 def default_output_path(input_path: Path) -> Path:
     """Build a clear output workbook path from the input workbook name."""
-    if input_path.name.startswith(INPUT_PREFIX):
-        output_name = input_path.name.replace(INPUT_PREFIX, OUTPUT_PREFIX, 1)
-        output_name = output_name.replace(".xlsx", f"_{DEFAULT_OUTPUT_SUFFIX}.xlsx")
-        output_name = output_name.replace(".xls", f"_{DEFAULT_OUTPUT_SUFFIX}.xlsx")
+    output_stem = input_path.stem
+    if output_stem.startswith(INPUT_PREFIX):
+        output_stem = output_stem.replace(INPUT_PREFIX, OUTPUT_PREFIX, 1)
     else:
-        output_name = f"{OUTPUT_PREFIX}{input_path.stem}_{DEFAULT_OUTPUT_SUFFIX}.xlsx"
+        output_stem = f"{OUTPUT_PREFIX}{output_stem}"
+    output_name = f"{output_stem}_{DEFAULT_OUTPUT_SUFFIX}.xlsx"
     return input_path.with_name(output_name)
 
 
@@ -163,8 +163,10 @@ def restore_output_column_names(df: pd.DataFrame) -> pd.DataFrame:
         "Dist_cs": f"Dist_{OUTPUT_CROSS}",
         "TMcal*Dist_as": f"TMcal*Dist_{OUTPUT_ALONG}",
         "TMcal*Dist_cs": f"TMcal*Dist_{OUTPUT_CROSS}",
-        "(TMcal*Dist_as)^2": f"(TMcal*Dist_{OUTPUT_ALONG})^2",
-        "(TMcal*Dist_cs)^2": f"(TMcal*Dist_{OUTPUT_CROSS})^2",
+        "Dev_as": f"Dev_{OUTPUT_ALONG}",
+        "Dev_cs": f"Dev_{OUTPUT_CROSS}",
+        "TMcal*Dev_as^2": f"TMcal*Dev_{OUTPUT_ALONG}^2",
+        "TMcal*Dev_cs^2": f"TMcal*Dev_{OUTPUT_CROSS}^2",
         "TMcal*as": f"TMcal*{OUTPUT_ALONG}",
         "TMcal*cs": f"TMcal*{OUTPUT_CROSS}",
         "CM_as": f"CM_{OUTPUT_ALONG}",
@@ -195,6 +197,10 @@ def build_reference_from_ip(ip_df: pd.DataFrame) -> dict:
         "prev_CMy": float(row0["y"]),
         "prev_CMas": 0.0,
         "prev_CMcs": 0.0,
+        "prev_var_x": 0.0,
+        "prev_var_y": 0.0,
+        "prev_var_as": 0.0,
+        "prev_var_cs": 0.0,
         "origin_x": float(row0["x"]),
         "origin_y": float(row0["y"]),
         "dreger_d_global": 0.15,
@@ -223,6 +229,10 @@ def process_campaign_sheet(
     prev_CMy,
     prev_CMas,
     prev_CMcs,
+    prev_var_x,
+    prev_var_y,
+    prev_var_as,
+    prev_var_cs,
     as_origin_x,
     as_origin_y,
     dreger_d_global,
@@ -291,15 +301,22 @@ def process_campaign_sheet(
     df["TMcal*Dist_as"] = df["TMcal"] * df["Dist_as"]
     df["TMcal*Dist_cs"] = df["TMcal"] * df["Dist_cs"]
 
-    df["(TMcal*Dist_x)^2"] = df["TMcal*Dist_x"] ** 2
-    df["(TMcal*Dist_y)^2"] = df["TMcal*Dist_y"] ** 2
-    df["(TMcal*Dist_as)^2"] = df["TMcal*Dist_as"] ** 2
-    df["(TMcal*Dist_cs)^2"] = df["TMcal*Dist_cs"] ** 2
-
     df["TMcal*x"] = df["TMcal"] * df["x"]
     df["TMcal*y"] = df["TMcal"] * df["y"]
     df["TMcal*as"] = df["TMcal"] * df["as"]
     df["TMcal*cs"] = df["TMcal"] * df["cs"]
+
+    for spread_col in [
+        "Dev_x",
+        "Dev_y",
+        "Dev_as",
+        "Dev_cs",
+        "TMcal*Dev_x^2",
+        "TMcal*Dev_y^2",
+        "TMcal*Dev_as^2",
+        "TMcal*Dev_cs^2",
+    ]:
+        df[spread_col] = float("nan")
 
     tm_sum = df["TMcal"].sum()
     tm_sq_sum = (df["TMcal"] ** 2).sum()
@@ -313,6 +330,8 @@ def process_campaign_sheet(
     grains_m2_mean = float("nan")
     T_rate_sum = float("nan")
     T_rate_pct_sum = float("nan")
+    var_x = var_y = var_as = var_cs = float("nan")
+    delta_var_x = delta_var_y = delta_var_as = delta_var_cs = float("nan")
 
     if tm_sum == 0 or math.isclose(tm_sum, 0.0):
         print(f"WARNING: Sum(TMcal) = 0 in '{sheet_name}'. Metrics set to NaN.")
@@ -326,14 +345,34 @@ def process_campaign_sheet(
         T_rate_sum = df["T_rate"].sum()
         T_rate_pct_sum = 100.0 * T_rate_sum / tracer_m
 
-        if delta_t_seconds == 0 or tm_sq_sum == 0 or math.isclose(tm_sq_sum, 0.0):
-            print(f"WARNING: zero denominator or zero delta_t in '{sheet_name}'. Diffusion set to NaN.")
+        df["Dev_x"] = df["x"] - CMx
+        df["Dev_y"] = df["y"] - CMy
+        df["Dev_as"] = df["as"] - CMas
+        df["Dev_cs"] = df["cs"] - CMcs
+        df["TMcal*Dev_x^2"] = df["TMcal"] * df["Dev_x"] ** 2
+        df["TMcal*Dev_y^2"] = df["TMcal"] * df["Dev_y"] ** 2
+        df["TMcal*Dev_as^2"] = df["TMcal"] * df["Dev_as"] ** 2
+        df["TMcal*Dev_cs^2"] = df["TMcal"] * df["Dev_cs"] ** 2
+
+        var_x = df["TMcal*Dev_x^2"].sum() / tm_sum
+        var_y = df["TMcal*Dev_y^2"].sum() / tm_sum
+        var_as = df["TMcal*Dev_as^2"].sum() / tm_sum
+        var_cs = df["TMcal*Dev_cs^2"].sum() / tm_sum
+        delta_var_x = var_x - prev_var_x
+        delta_var_y = var_y - prev_var_y
+        delta_var_as = var_as - prev_var_as
+        delta_var_cs = var_cs - prev_var_cs
+
+        if delta_t_seconds == 0:
+            print(f"WARNING: zero delta_t in '{sheet_name}'. Diffusion set to NaN.")
         else:
-            denom = tm_sq_sum * delta_t_seconds
-            D_x = df["(TMcal*Dist_x)^2"].sum() / denom
-            D_y = df["(TMcal*Dist_y)^2"].sum() / denom
-            D_as = df["(TMcal*Dist_as)^2"].sum() / denom
-            D_cs = df["(TMcal*Dist_cs)^2"].sum() / denom
+            # Miller & Komar / method-of-moments style spreading coefficient:
+            # K = 0.5 * d(sigma^2) / dt, using TMcal-weighted variances.
+            denom = 2.0 * delta_t_seconds
+            D_x = delta_var_x / denom
+            D_y = delta_var_y / denom
+            D_as = delta_var_as / denom
+            D_cs = delta_var_cs / denom
             D_total_xy = D_x + D_y
             D_total_as_cs = D_as + D_cs
             Dr_xy = math.sqrt(D_x ** 2 + D_y ** 2)
@@ -377,6 +416,18 @@ def process_campaign_sheet(
         "TMcal_sum": [tm_sum],
         "TMcal_sq_sum": [tm_sq_sum],
         "delta_t_s": [delta_t_seconds],
+        "Var_x": [var_x],
+        "Var_y": [var_y],
+        f"Var_{OUTPUT_ALONG}": [var_as],
+        f"Var_{OUTPUT_CROSS}": [var_cs],
+        "Prev_Var_x": [prev_var_x],
+        "Prev_Var_y": [prev_var_y],
+        f"Prev_Var_{OUTPUT_ALONG}": [prev_var_as],
+        f"Prev_Var_{OUTPUT_CROSS}": [prev_var_cs],
+        "Delta_Var_x": [delta_var_x],
+        "Delta_Var_y": [delta_var_y],
+        f"Delta_Var_{OUTPUT_ALONG}": [delta_var_as],
+        f"Delta_Var_{OUTPUT_CROSS}": [delta_var_cs],
         "DistCM_x": [dist_cm_x],
         "DistCM_y": [dist_cm_y],
         f"DistCM_{OUTPUT_ALONG}": [dist_cm_as],
@@ -415,7 +466,20 @@ def process_campaign_sheet(
         "csb_azimuth_deg": [CROSS_AZIMUTH_DEG],
     })
 
-    return restore_output_column_names(df), cm_sheet_name, cm_df, this_end_date, CMx, CMy, CMas, CMcs
+    return (
+        restore_output_column_names(df),
+        cm_sheet_name,
+        cm_df,
+        this_end_date,
+        CMx,
+        CMy,
+        CMas,
+        CMcs,
+        var_x,
+        var_y,
+        var_as,
+        var_cs,
+    )
 
 
 def metadata_table(input_file: Path, output_file: Path, campaign_sheets: list[str]) -> pd.DataFrame:
@@ -427,6 +491,10 @@ def metadata_table(input_file: Path, output_file: Path, campaign_sheets: list[st
         ("origin_mode", GLOBAL_ORIGIN_MODE),
         ("origin_x", "IP/reference x coordinate; see CM sheets"),
         ("origin_y", "IP/reference y coordinate; see CM sheets"),
+        ("transport_distance_mode", "sample/CM displacement from previous campaign CM or IP"),
+        ("diffusion_mode", "method of moments; time-rate of change of weighted variance"),
+        ("diffusion_convention", "D = delta_variance / (2 * delta_t), using TMcal weights"),
+        ("first_interval_variance_assumption", "IP/reference variance = 0"),
         ("asb_azimuth_deg", ALONG_AZIMUTH_DEG),
         ("csb_azimuth_deg", CROSS_AZIMUTH_DEG),
         ("campaign_sheets_expected", ", ".join(campaign_sheets)),
@@ -491,6 +559,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
     prev_CMy = ref["prev_CMy"]
     prev_CMas = ref["prev_CMas"]
     prev_CMcs = ref["prev_CMcs"]
+    prev_var_x = ref["prev_var_x"]
+    prev_var_y = ref["prev_var_y"]
+    prev_var_as = ref["prev_var_as"]
+    prev_var_cs = ref["prev_var_cs"]
     as_origin_x = ref["origin_x"]
     as_origin_y = ref["origin_y"]
 
@@ -520,6 +592,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
             CMy,
             CMas,
             CMcs,
+            var_x,
+            var_y,
+            var_as,
+            var_cs,
         ) = process_campaign_sheet(
             df=df,
             sheet_name=sheet_name,
@@ -528,6 +604,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
             prev_CMy=prev_CMy,
             prev_CMas=prev_CMas,
             prev_CMcs=prev_CMcs,
+            prev_var_x=prev_var_x,
+            prev_var_y=prev_var_y,
+            prev_var_as=prev_var_as,
+            prev_var_cs=prev_var_cs,
             as_origin_x=as_origin_x,
             as_origin_y=as_origin_y,
             dreger_d_global=ref["dreger_d_global"],
@@ -555,6 +635,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
         D_total_as_cs = float(row[f"D_total_{OUTPUT_ALONG}_{OUTPUT_CROSS}"])
         Dr_xy = float(row["Dr_xy"])
         Dr_as_cs = float(row[f"Dr_{OUTPUT_ALONG}_{OUTPUT_CROSS}"])
+        delta_var_x = float(row["Delta_Var_x"])
+        delta_var_y = float(row["Delta_Var_y"])
+        delta_var_as = float(row[f"Delta_Var_{OUTPUT_ALONG}"])
+        delta_var_cs = float(row[f"Delta_Var_{OUTPUT_CROSS}"])
 
         Vm_x = float(row["Vm_x"])
         Vm_y = float(row["Vm_y"])
@@ -580,6 +664,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
 
         diff_rows.append({
             "Sampling intervals": interval_label,
+            "Delta_Var_x": delta_var_x,
+            "Delta_Var_y": delta_var_y,
+            f"Delta_Var_{OUTPUT_ALONG}": delta_var_as,
+            f"Delta_Var_{OUTPUT_CROSS}": delta_var_cs,
             "D_x": scaled_1e8(D_x),
             "D_y": scaled_1e8(D_y),
             f"D_{OUTPUT_ALONG}": scaled_1e8(D_as),
@@ -595,6 +683,10 @@ def process_workbook(input_file: Path, output_file: Path, campaign_sheets: list[
         prev_CMy = CMy
         prev_CMas = CMas
         prev_CMcs = CMcs
+        prev_var_x = var_x
+        prev_var_y = var_y
+        prev_var_as = var_as
+        prev_var_cs = var_cs
         prev_label = sheet_name
 
     vmq_df = pd.DataFrame(vmq_rows)
